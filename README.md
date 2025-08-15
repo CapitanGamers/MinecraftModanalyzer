@@ -1,2 +1,4 @@
 # MinecraftModanalyzer
-here to help
+This tools have some requirments.
+
+ pip install tkinter pillow requests
