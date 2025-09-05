@@ -41,7 +41,9 @@ class ModAnalyzer:
         self.mods = []
         self.compatibility_db = {}
         self.performance_db = {}
+        self.player_count = 10
         self.init_database()
+        self.init_compatibility_data()
         
     def init_database(self):
         try:
@@ -73,6 +75,38 @@ class ModAnalyzer:
         except Exception as e:
             print(f"خطا در ایجاد پایگاه داده: {e}")
             self.conn = None
+
+    def init_compatibility_data(self):
+        self.known_incompatibilities = {
+            'optifine': ['sodium', 'iris', 'canvas', 'rubidium'],
+            'sodium': ['optifine', 'smooth boot'],
+            'forge': ['fabric', 'quilt'],
+            'fabric': ['forge', 'liteloader'],
+            'twilight forest': ['aether', 'betweenlands'],
+            'industrialcraft': ['tech reborn', 'gregtech'],
+            'thaumcraft': ['ars magica', 'blood magic'],
+            'tinkers construct': ['silent gear', 'tetra'],
+            'applied energistics 2': ['refined storage'],
+            'refined storage': ['applied energistics 2'],
+            'buildcraft': ['industrialcraft', 'thermal expansion'],
+            'mekanism': ['ic2', 'nuclearcraft'],
+            'immersive engineering': ['create', 'crossroads mc']
+        }
+        
+        self.required_dependencies = {
+            'jei': ['forge api', 'fabric api'],
+            'waila': ['forge api', 'fabric api'],
+            'thaumcraft': ['baubles'],
+            'applied energistics 2': ['forge energy'],
+            'mekanism': ['forge api'],
+            'buildcraft': ['forge api'],
+            'twilight forest': ['ctm'],
+            'biomesoplenty': ['forge api', 'glitchcore'],
+            'create': ['flywheel'],
+            'supplementaries': ['moonlight lib'],
+            'farmers delight': ['forge api'],
+            'quark': ['autoreglib']
+        }
 
     def analyze_mod_file(self, file_path: str) -> Optional[ModInfo]:
         try:
@@ -200,11 +234,17 @@ class ModAnalyzer:
                 mc_version_match = re.search(r'minecraftVersion\s*=\s*"([^"]*)"', content)
                 mod_id_match = re.search(r'modId\s*=\s*"([^"]*)"', content)
                 
+                version = 'Unknown'
+                if version_match:
+                    version = version_match.group(1)
+                    if '${' in version:
+                        version = 'Unknown'
+                
                 mod_id = mod_id_match.group(1) if mod_id_match else 'unknown'
                 
                 return ModInfo(
                     name=name_match.group(1) if name_match else 'Unknown',
-                    version=version_match.group(1) if version_match else 'Unknown',
+                    version=version,
                     mc_version=mc_version_match.group(1) if mc_version_match else 'Unknown',
                     mod_loader='Forge',
                     file_path=file_path,
@@ -212,7 +252,7 @@ class ModAnalyzer:
                     dependencies=[],
                     conflicts=[],
                     memory_usage=self._estimate_memory_usage(file_path),
-                    performance_impact='medium',
+                    performance_impact=self._estimate_performance_impact(name_match.group(1) if name_match else ''),
                     mod_id=mod_id
                 )
         except Exception as e:
@@ -244,19 +284,21 @@ class ModAnalyzer:
             size_mb = os.path.getsize(file_path) / (1024 * 1024)
             
             if size_mb < 1:
-                return 32
+                return 16
             elif size_mb < 5:
-                return 64
+                return 32
+            elif size_mb < 10:
+                return 48
             elif size_mb < 20:
-                return 128
+                return 64
             else:
-                return 256
+                return 96
         except:
-            return 64
+            return 32
 
     def _estimate_performance_impact(self, mod_name: str) -> str:
-        high_impact_mods = ['optifine', 'shaders', 'twilight forest', 'thaumcraft', 'industrial craft', 'thermal', 'mekanism']
-        medium_impact_mods = ['buildcraft', 'thermal expansion', 'tinkers construct', 'applied energistics', 'forestry']
+        high_impact_mods = ['optifine', 'shaders', 'twilight forest', 'thaumcraft', 'industrial craft', 'thermal', 'mekanism', 'galacticraft', 'pixelmon']
+        medium_impact_mods = ['buildcraft', 'thermal expansion', 'tinkers construct', 'applied energistics', 'forestry', 'railcraft', 'botania']
         
         mod_name_lower = mod_name.lower()
         
@@ -310,7 +352,7 @@ class ModAnalyzer:
             print(f"خطا در ذخیره لیست فایل‌ها: {e}")
             return False
 
-    def export_mod_whitelist(self, output_path: str) -> bool:
+    def export_mod_whitelist(self, output_path: str, include_version: bool = False) -> bool:
         try:
             with open(output_path, 'w', encoding='utf-8') as f:
                 f.write("# Minecraft Server Mod Whitelist\n")
@@ -319,94 +361,199 @@ class ModAnalyzer:
                 f.write("# Total mods: {}\n\n".format(len(self.mods)))
                 
                 for mod in self.mods:
-                    f.write(f"{mod.mod_id}\n")
+                    if include_version and mod.version != 'Unknown':
+                        f.write(f"{mod.mod_id}:{mod.version}\n")
+                    else:
+                        f.write(f"{mod.mod_id}\n")
                     
             return True
         except Exception as e:
             print(f"خطا در ذخیره whitelist: {e}")
             return False
 
-    def check_compatibility(self) -> Dict[str, float]:
-        compatibility_scores = {}
+    def check_compatibility(self) -> Dict[str, any]:
+        compatibility_issues = []
+        missing_dependencies = []
+        conflicting_mods = []
         
-        if not self.mods:
-            return {'overall': 0.0}
+        mod_ids_lower = {mod.mod_id.lower(): mod for mod in self.mods}
+        mod_names_lower = {mod.name.lower(): mod for mod in self.mods}
+        
+        for mod in self.mods:
+            mod_key = mod.name.lower()
+            
+            if mod_key in self.known_incompatibilities:
+                for incompatible in self.known_incompatibilities[mod_key]:
+                    if incompatible in mod_names_lower:
+                        conflicting_mods.append({
+                            'mod1': mod.name,
+                            'mod2': mod_names_lower[incompatible].name,
+                            'reason': f"{mod.name} is incompatible with {mod_names_lower[incompatible].name}"
+                        })
+            
+            if mod_key in self.required_dependencies:
+                for dep in self.required_dependencies[mod_key]:
+                    dep_lower = dep.lower()
+                    found = False
+                    for check_mod in self.mods:
+                        if dep_lower in check_mod.name.lower() or dep_lower in check_mod.mod_id.lower():
+                            found = True
+                            break
+                    if not found:
+                        missing_dependencies.append({
+                            'mod': mod.name,
+                            'missing': dep,
+                            'type': 'required'
+                        })
         
         mc_versions = set(mod.mc_version for mod in self.mods if mod.mc_version != 'Unknown')
         if len(mc_versions) > 1:
-            compatibility_scores['minecraft_version'] = 0.3
-        else:
-            compatibility_scores['minecraft_version'] = 1.0
+            compatibility_issues.append({
+                'type': 'version_mismatch',
+                'description': f"Multiple Minecraft versions detected: {', '.join(mc_versions)}"
+            })
         
         loaders = set(mod.mod_loader for mod in self.mods if mod.mod_loader != 'Unknown')
+        if 'Forge' in loaders and 'Fabric' in loaders:
+            compatibility_issues.append({
+                'type': 'loader_conflict',
+                'description': "Both Forge and Fabric mods detected - they cannot run together"
+            })
+        
+        compatibility_score = self._calculate_compatibility_score(
+            compatibility_issues, missing_dependencies, conflicting_mods, mc_versions, loaders
+        )
+        
+        return {
+            'compatibility_issues': compatibility_issues,
+            'missing_dependencies': missing_dependencies,
+            'conflicting_mods': conflicting_mods,
+            'mc_versions': list(mc_versions),
+            'loaders': list(loaders),
+            'compatibility_score': compatibility_score
+        }
+    
+    def _calculate_compatibility_score(self, issues, missing_deps, conflicts, mc_versions, loaders):
+        score = 100.0
+        
+        score -= len(issues) * 15
+        
+        score -= len(conflicts) * 10
+        
+        score -= len(missing_deps) * 5
+        
+        if len(mc_versions) > 1:
+            score -= 20
+        
         if len(loaders) > 1:
-            compatibility_scores['mod_loader'] = 0.2
-        else:
-            compatibility_scores['mod_loader'] = 1.0
+            loader_list = list(loaders)
+            if 'Forge' in loader_list and 'Fabric' in loader_list:
+                score -= 50
         
-        all_mod_names = set(mod.name.lower() for mod in self.mods)
-        missing_deps = []
+        unknown_mods = sum(1 for mod in self.mods if mod.mod_loader == 'Unknown')
+        if unknown_mods > 0:
+            score -= (unknown_mods / len(self.mods)) * 10
         
-        for mod in self.mods:
-            for dep in mod.dependencies:
-                if dep.lower() not in all_mod_names and dep not in ['minecraft', 'forge', 'fabric']:
-                    missing_deps.append(f"{mod.name} needs {dep}")
-        
-        if missing_deps:
-            compatibility_scores['dependencies'] = max(0.0, 1.0 - len(missing_deps) * 0.1)
-        else:
-            compatibility_scores['dependencies'] = 1.0
-        
-        if compatibility_scores:
-            overall_score = sum(compatibility_scores.values()) / len(compatibility_scores)
-        else:
-            overall_score = 0.0
-        compatibility_scores['overall'] = overall_score
-        
-        return compatibility_scores
+        return max(0, min(100, score))
 
-    def calculate_hardware_requirements(self) -> Dict[str, any]:
+    def calculate_hardware_requirements(self, player_count: int = None) -> Dict[str, any]:
+        if player_count is None:
+            player_count = self.player_count
+            
         if not self.mods:
-            return {
-                'total_ram_mb': 2048,
-                'total_ram_gb': 2.0,
-                'cpu_recommendation': 'Intel i3 یا AMD Ryzen 3',
-                'gpu_recommendation': 'GTX 1050 یا معادل',
-                'high_impact_mods': 0,
-                'total_mods': 0
-            }
+            return self._get_vanilla_requirements(player_count)
         
-        total_memory = sum(mod.memory_usage for mod in self.mods)
+        base_ram_mb = {
+            10: 1024,
+            20: 1536,
+            30: 2048
+        }.get(player_count, 1024)
+        
+        mod_memory = 0
+        for mod in self.mods:
+            mod_memory += mod.memory_usage
+        
         high_impact_count = sum(1 for mod in self.mods if mod.performance_impact == 'high')
         medium_impact_count = sum(1 for mod in self.mods if mod.performance_impact == 'medium')
         
-        base_ram = 2048
-        mod_ram = total_memory
-        extra_ram = high_impact_count * 512 + medium_impact_count * 256
+        player_memory = player_count * 50
         
-        total_ram = base_ram + mod_ram + extra_ram
+        impact_memory = (high_impact_count * 256) + (medium_impact_count * 128)
         
-        if high_impact_count > 5:
-            cpu_recommendation = "Intel i7/i9 یا AMD Ryzen 7/9 (حداقل 8 هسته)"
-        elif high_impact_count > 2:
-            cpu_recommendation = "Intel i5 یا AMD Ryzen 5 (حداقل 6 هسته)"
+        total_ram_mb = base_ram_mb + mod_memory + player_memory + impact_memory
+        
+        overhead_multiplier = 1.2
+        total_ram_mb = int(total_ram_mb * overhead_multiplier)
+        
+        if player_count <= 10:
+            if high_impact_count > 5:
+                cpu_recommendation = "Intel i5-10400 / AMD Ryzen 5 3600 (6 cores, 3.5+ GHz)"
+            elif high_impact_count > 2:
+                cpu_recommendation = "Intel i3-10100 / AMD Ryzen 3 3300X (4 cores, 3.5+ GHz)"
+            else:
+                cpu_recommendation = "Intel i3-9100 / AMD Ryzen 3 3200G (4 cores, 3.0+ GHz)"
+        elif player_count <= 20:
+            if high_impact_count > 5:
+                cpu_recommendation = "Intel i7-10700 / AMD Ryzen 7 3700X (8 cores, 3.5+ GHz)"
+            elif high_impact_count > 2:
+                cpu_recommendation = "Intel i5-10600K / AMD Ryzen 5 5600X (6 cores, 3.5+ GHz)"
+            else:
+                cpu_recommendation = "Intel i5-10400 / AMD Ryzen 5 3600 (6 cores, 3.0+ GHz)"
         else:
-            cpu_recommendation = "Intel i3 یا AMD Ryzen 3 (حداقل 4 هسته)"
+            if high_impact_count > 5:
+                cpu_recommendation = "Intel i9-10900K / AMD Ryzen 9 3900X (10+ cores, 3.5+ GHz)"
+            elif high_impact_count > 2:
+                cpu_recommendation = "Intel i7-10700K / AMD Ryzen 7 5800X (8 cores, 3.5+ GHz)"
+            else:
+                cpu_recommendation = "Intel i7-10700 / AMD Ryzen 7 3700X (8 cores, 3.0+ GHz)"
         
-        shader_mods = any('shader' in mod.name.lower() or 'optifine' in mod.name.lower() for mod in self.mods)
-        if shader_mods:
-            gpu_recommendation = "GTX 1660/RTX 2060 یا بالاتر"
-        else:
-            gpu_recommendation = "GTX 1050 یا معادل"
+        gpu_recommendation = "Integrated graphics (server-side only)"
+        
+        disk_space = 5 + (len(self.mods) * 0.05) + (player_count * 0.2)
+        
+        network_bandwidth = player_count * 0.05 + (high_impact_count * 0.02)
         
         return {
-            'total_ram_mb': total_ram,
-            'total_ram_gb': round(total_ram / 1024, 1),
+            'total_ram_mb': total_ram_mb,
+            'total_ram_gb': round(total_ram_mb / 1024, 1),
+            'recommended_ram_gb': round((total_ram_mb * 1.3) / 1024, 1),
             'cpu_recommendation': cpu_recommendation,
             'gpu_recommendation': gpu_recommendation,
             'high_impact_mods': high_impact_count,
-            'total_mods': len(self.mods)
+            'medium_impact_mods': medium_impact_count,
+            'total_mods': len(self.mods),
+            'player_count': player_count,
+            'disk_space_gb': round(disk_space, 1),
+            'network_mbps': round(network_bandwidth, 1),
+            'jvm_settings': self._generate_jvm_settings(total_ram_mb)
         }
+    
+    def _get_vanilla_requirements(self, player_count: int) -> Dict[str, any]:
+        base_requirements = {
+            10: {'ram': 2, 'cpu': 'Intel i3-9100 / AMD Ryzen 3 3200G'},
+            20: {'ram': 3, 'cpu': 'Intel i5-10400 / AMD Ryzen 5 3600'},
+            30: {'ram': 4, 'cpu': 'Intel i7-10700 / AMD Ryzen 7 3700X'}
+        }
+        
+        req = base_requirements.get(player_count, base_requirements[10])
+        
+        return {
+            'total_ram_mb': req['ram'] * 1024,
+            'total_ram_gb': req['ram'],
+            'recommended_ram_gb': req['ram'] + 1,
+            'cpu_recommendation': req['cpu'],
+            'gpu_recommendation': 'Integrated graphics',
+            'high_impact_mods': 0,
+            'medium_impact_mods': 0,
+            'total_mods': 0,
+            'player_count': player_count,
+            'disk_space_gb': 2.0,
+            'network_mbps': player_count * 0.03,
+            'jvm_settings': self._generate_jvm_settings(req['ram'] * 1024)
+        }
+    
+    def _generate_jvm_settings(self, ram_mb: int) -> str:
+        return f"-Xmx{ram_mb}M -Xms{int(ram_mb * 0.75)}M -XX:+UseG1GC -XX:+UnlockExperimentalVMOptions -XX:G1NewSizePercent=20 -XX:G1ReservePercent=20 -XX:MaxGCPauseMillis=50 -XX:G1HeapRegionSize=32M"
 
     def __del__(self):
         if hasattr(self, 'conn') and self.conn:
@@ -457,6 +604,7 @@ class ModAnalyzerGUI:
                  foreground=[('selected', self.text_color)])
         
         self.analyzer = ModAnalyzer()
+        self.include_version_var = tk.BooleanVar(value=False)
         self.setup_ui()
         
     def setup_ui(self):
@@ -518,6 +666,12 @@ class ModAnalyzerGUI:
                                          command=self.export_whitelist, style='Custom.TButton')
         export_whitelist_btn.pack(side='left', padx=5)
         
+        version_check = tk.Checkbutton(export_frame, text="Include version in whitelist", 
+                                      variable=self.include_version_var,
+                                      bg=self.secondary_bg, fg=self.text_color,
+                                      selectcolor=self.secondary_bg)
+        version_check.pack(side='left', padx=10)
+        
         columns = ('نام', 'ورژن', 'ورژن MC', 'لودر', 'سایز', 'تأثیر عملکرد', 'Mod ID')
         self.mods_tree = ttk.Treeview(mods_frame, columns=columns, show='headings', height=15)
         
@@ -561,12 +715,33 @@ class ModAnalyzerGUI:
         hardware_frame = ttk.Frame(self.notebook)
         self.notebook.add(hardware_frame, text="💻 نیازمندی سخت افزار")
         
+        player_frame = tk.Frame(hardware_frame, bg=self.secondary_bg)
+        player_frame.pack(fill='x', padx=10, pady=10)
+        
+        ttk.Label(player_frame, text="تعداد بازیکنان:", style='Header.TLabel').pack(side='left', padx=5)
+        
+        self.player_var = tk.IntVar(value=10)
+        player_10 = tk.Radiobutton(player_frame, text="10 بازیکن", variable=self.player_var, value=10,
+                                  bg=self.secondary_bg, fg=self.text_color, selectcolor=self.bg_color,
+                                  command=self.update_hardware_requirements)
+        player_10.pack(side='left', padx=5)
+        
+        player_20 = tk.Radiobutton(player_frame, text="20 بازیکن", variable=self.player_var, value=20,
+                                  bg=self.secondary_bg, fg=self.text_color, selectcolor=self.bg_color,
+                                  command=self.update_hardware_requirements)
+        player_20.pack(side='left', padx=5)
+        
+        player_30 = tk.Radiobutton(player_frame, text="30 بازیکن", variable=self.player_var, value=30,
+                                  bg=self.secondary_bg, fg=self.text_color, selectcolor=self.bg_color,
+                                  command=self.update_hardware_requirements)
+        player_30.pack(side='left', padx=5)
+        
         hw_results_frame = tk.Frame(hardware_frame, bg=self.secondary_bg)
         hw_results_frame.pack(fill='both', expand=True, padx=10, pady=10)
         
         ttk.Label(hw_results_frame, text="⚙️ پیشنهادات سخت افزاری", style='Header.TLabel').pack(anchor='w')
         
-        self.hardware_text = scrolledtext.ScrolledText(hw_results_frame, height=20, width=80,
+        self.hardware_text = scrolledtext.ScrolledText(hw_results_frame, height=18, width=80,
                                                      font=('Arial', 10), 
                                                      bg=self.secondary_bg, 
                                                      fg=self.text_color,
@@ -623,6 +798,7 @@ class ModAnalyzerGUI:
 
     def _analyze_thread(self):
         try:
+            self.analyzer.player_count = self.player_var.get()
             self.analyzer.scan_directory(self.path_var.get(), self.update_progress)
             self.root.after(0, self.display_results)
         except Exception as e:
@@ -676,6 +852,13 @@ class ModAnalyzerGUI:
             messagebox.showwarning("هشدار", "ابتدا ماد ها را تحلیل کنید")
             return
         
+        include_version = self.include_version_var.get()
+        
+        if include_version:
+            result = messagebox.askyesno("تایید", "آیا میخواهید ورژن ماد ها نیز در whitelist قرار گیرد؟\n\nفرمت: modid:version")
+            if not result:
+                include_version = False
+        
         file_path = filedialog.asksaveasfilename(
             defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
@@ -684,89 +867,126 @@ class ModAnalyzerGUI:
         )
         
         if file_path:
-            if self.analyzer.export_mod_whitelist(file_path):
+            if self.analyzer.export_mod_whitelist(file_path, include_version):
                 messagebox.showinfo("موفقیت", "Whitelist با موفقیت ذخیره شد")
             else:
                 messagebox.showerror("خطا", "خطا در ذخیره Whitelist")
 
     def display_compatibility_results(self):
         try:
-            compatibility = self.analyzer.check_compatibility()
+            compat_data = self.analyzer.check_compatibility()
             
-            text = "🔍 تحلیل سازگاری ماد ها\n"
+            text = "🔍 Mod Compatibility Analysis\n"
             text += "=" * 50 + "\n\n"
             
-            overall_score = compatibility.get('overall', 0) * 100
-            text += f"📊 امتیاز سازگاری کلی: {overall_score:.1f}%\n\n"
+            score = compat_data.get('compatibility_score', 0)
+            text += f"📊 Overall Compatibility Score: {score:.1f}%\n\n"
             
-            if overall_score >= 80:
-                text += "✅ سازگاری عالی - مشکل خاصی پیش بینی نمی شود\n\n"
-            elif overall_score >= 60:
-                text += "⚠️ سازگاری متوسط - ممکن است مشکلات جزئی داشته باشید\n\n"
+            if score >= 90:
+                text += "✅ Excellent compatibility - No major issues expected\n\n"
+            elif score >= 75:
+                text += "✓ Good compatibility - Minor issues may occur\n\n"
+            elif score >= 60:
+                text += "⚠️ Fair compatibility - Some issues expected\n\n"
+            elif score >= 40:
+                text += "⚠️ Poor compatibility - Significant issues likely\n\n"
             else:
-                text += "❌ سازگاری ضعیف - مشکلات جدی احتمال دارد\n\n"
+                text += "❌ Critical compatibility issues - Major problems expected\n\n"
             
-            text += "📋 جزئیات سازگاری:\n"
-            text += f"• ورژن ماینکرفت: {compatibility.get('minecraft_version', 0) * 100:.1f}%\n"
-            text += f"• نوع لودر: {compatibility.get('mod_loader', 0) * 100:.1f}%\n"
-            text += f"• وابستگی ها: {compatibility.get('dependencies', 0) * 100:.1f}%\n\n"
+            issues = compat_data.get('compatibility_issues', [])
+            conflicts = compat_data.get('conflicting_mods', [])
+            missing = compat_data.get('missing_dependencies', [])
             
-            mc_versions = set(mod.mc_version for mod in self.analyzer.mods if mod.mc_version != 'Unknown')
-            loaders = set(mod.mod_loader for mod in self.analyzer.mods if mod.mod_loader != 'Unknown')
+            if issues:
+                text += "📌 General Issues:\n"
+                for issue in issues:
+                    text += f"  • {issue['description']}\n"
+                text += "\n"
             
-            text += "📈 آمار کلی:\n"
-            text += f"• تعداد کل ماد ها: {len(self.analyzer.mods)}\n"
-            text += f"• ورژن های ماینکرفت: {', '.join(mc_versions) if mc_versions else 'نامشخص'}\n"
-            text += f"• انواع لودر: {', '.join(loaders) if loaders else 'نامشخص'}\n"
+            if conflicts:
+                text += "❌ Conflicting Mods:\n"
+                for conflict in conflicts:
+                    text += f"  • {conflict['reason']}\n"
+                text += "\n"
+            
+            if missing:
+                text += "📦 Missing Dependencies:\n"
+                for dep in missing:
+                    text += f"  • {dep['mod']} requires {dep['missing']}\n"
+                text += "\n"
+            
+            text += "📊 Mod Statistics:\n"
+            text += f"  • Total Mods: {len(self.analyzer.mods)}\n"
+            text += f"  • Minecraft Versions: {', '.join(compat_data.get('mc_versions', [])) or 'Unknown'}\n"
+            text += f"  • Mod Loaders: {', '.join(compat_data.get('loaders', [])) or 'Unknown'}\n\n"
+            
+            if not issues and not conflicts and not missing:
+                text += "✅ All mods appear to be compatible!\n"
             
             self.compatibility_text.delete(1.0, tk.END)
             self.compatibility_text.insert(1.0, text)
         except Exception as e:
             self.compatibility_text.delete(1.0, tk.END)
-            self.compatibility_text.insert(1.0, f"خطا در نمایش نتایج سازگاری: {e}")
+            self.compatibility_text.insert(1.0, f"Error displaying compatibility results: {e}")
+
+    def update_hardware_requirements(self):
+        if self.analyzer.mods:
+            self.analyzer.player_count = self.player_var.get()
+            self.display_hardware_requirements()
 
     def display_hardware_requirements(self):
         try:
-            hw_req = self.analyzer.calculate_hardware_requirements()
+            player_count = self.player_var.get()
+            hw_req = self.analyzer.calculate_hardware_requirements(player_count)
             
-            text = "💻 پیشنهادات سخت افزاری\n"
+            text = f"💻 Hardware Requirements for {player_count} Players\n"
             text += "=" * 50 + "\n\n"
             
-            text += f"🎯 تنظیمات پیشنهادی برای {hw_req['total_mods']} ماد:\n\n"
+            text += f"🎯 Configuration for {hw_req['total_mods']} mods and {player_count} players:\n\n"
             
-            text += f"🧠 حافظه (RAM):\n"
-            text += f"• حداقل: {hw_req['total_ram_gb']} گیگابایت\n"
-            text += f"• پیشنهادی: {hw_req['total_ram_gb'] + 2} گیگابایت\n"
-            text += f"• برای عملکرد بهتر: {hw_req['total_ram_gb'] + 4} گیگابایت\n\n"
+            text += f"🧠 Memory (RAM):\n"
+            text += f"  • Minimum: {hw_req['total_ram_gb']} GB\n"
+            text += f"  • Recommended: {hw_req['recommended_ram_gb']} GB\n"
+            text += f"  • Allocated RAM: {hw_req['total_ram_mb']} MB\n\n"
             
-            text += f"⚡ پردازنده (CPU):\n"
-            text += f"• {hw_req['cpu_recommendation']}\n\n"
+            text += f"⚡ Processor (CPU):\n"
+            text += f"  • {hw_req['cpu_recommendation']}\n\n"
             
-            text += f"🎮 کارت گرافیک (GPU):\n"
-            text += f"• {hw_req['gpu_recommendation']}\n\n"
+            text += f"💾 Storage Requirements:\n"
+            text += f"  • Minimum: {hw_req['disk_space_gb']} GB\n"
+            text += f"  • Recommended: {hw_req['disk_space_gb'] + 10} GB\n\n"
             
-            text += f"⚙️ تنظیمات پیشنهادی JVM:\n"
-            text += f"• -Xmx{int(hw_req['total_ram_gb'] * 1024)}M\n"
-            text += f"• -Xms{int(hw_req['total_ram_gb'] * 512)}M\n"
-            text += f"• -XX:+UseG1GC\n"
-            text += f"• -XX:G1HeapRegionSize=32M\n\n"
+            text += f"🌐 Network Bandwidth:\n"
+            text += f"  • Minimum: {hw_req['network_mbps']} Mbps\n"
+            text += f"  • Recommended: {hw_req['network_mbps'] * 2} Mbps\n\n"
+            
+            text += f"⚙️ JVM Settings:\n"
+            text += f"  {hw_req['jvm_settings']}\n\n"
+            
+            text += f"📊 Mod Impact Analysis:\n"
+            text += f"  • High Impact Mods: {hw_req['high_impact_mods']}\n"
+            text += f"  • Medium Impact Mods: {hw_req['medium_impact_mods']}\n"
+            text += f"  • Low Impact Mods: {hw_req['total_mods'] - hw_req['high_impact_mods'] - hw_req['medium_impact_mods']}\n\n"
             
             if hw_req['high_impact_mods'] > 3:
-                text += "⚠️ هشدار: تعداد زیادی ماد با تأثیر بالا روی عملکرد دارید\n"
-                text += "  • عملکرد سرور ممکن است کند شود\n"
-                text += "  • مصرف منابع بالا خواهد بود\n\n"
+                text += "⚠️ Performance Warning:\n"
+                text += f"  • {hw_req['high_impact_mods']} high-impact mods detected\n"
+                text += "  • Server performance may be significantly affected\n"
+                text += "  • Consider upgrading hardware or reducing mod count\n\n"
             
-            text += "🔧 پیشنهادات بهینه سازی:\n"
-            text += "• از OptiFine یا Sodium استفاده کنید\n"
-            text += "• تنظیمات گرافیکی را کاهش دهید\n"
-            text += "• ماد های غیرضروری را حذف کنید\n"
-            text += "• فاصله رندر را کم کنید\n"
+            text += "🔧 Optimization Tips:\n"
+            text += "  • Pre-generate world chunks\n"
+            text += "  • Use performance mods (Lithium, Phosphor, etc.)\n"
+            text += "  • Enable server-side view distance limiting\n"
+            text += "  • Configure entity/tile entity limits\n"
+            text += "  • Use SSD for world storage\n"
+            text += "  • Consider using Paper/Purpur for better performance\n"
             
             self.hardware_text.delete(1.0, tk.END)
             self.hardware_text.insert(1.0, text)
         except Exception as e:
             self.hardware_text.delete(1.0, tk.END)
-            self.hardware_text.insert(1.0, f"خطا در نمایش نیازمندی های سخت افزاری: {e}")
+            self.hardware_text.insert(1.0, f"Error displaying hardware requirements: {e}")
 
     def display_full_report(self):
         try:
@@ -775,7 +995,8 @@ class ModAnalyzerGUI:
             
             report += f"📅 تاریخ تحلیل: {time.strftime('%Y/%m/%d %H:%M:%S')}\n"
             report += f"📁 مسیر تحلیل شده: {self.path_var.get()}\n"
-            report += f"📦 تعداد ماد ها: {len(self.analyzer.mods)}\n\n"
+            report += f"📦 تعداد ماد ها: {len(self.analyzer.mods)}\n"
+            report += f"👥 تعداد بازیکنان: {self.player_var.get()}\n\n"
             
             report += "📋 جزئیات ماد ها:\n"
             report += "-" * 40 + "\n"
@@ -793,13 +1014,22 @@ class ModAnalyzerGUI:
                     report += f"   • وابستگی ها: {', '.join(mod.dependencies)}\n"
                 report += "\n"
             
-            compatibility = self.analyzer.check_compatibility()
-            report += f"🔗 امتیاز سازگاری: {compatibility.get('overall', 0) * 100:.1f}%\n\n"
+            compat_data = self.analyzer.check_compatibility()
+            report += f"\n🔗 امتیاز سازگاری: {compat_data.get('compatibility_score', 0):.1f}%\n"
             
-            hw_req = self.analyzer.calculate_hardware_requirements()
-            report += f"💻 حافظه پیشنهادی: {hw_req['total_ram_gb']} GB\n"
-            report += f"⚡ CPU: {hw_req['cpu_recommendation']}\n"
-            report += f"🎮 GPU: {hw_req['gpu_recommendation']}\n"
+            if compat_data['conflicting_mods'] or compat_data['missing_dependencies']:
+                report += "\n⚠️ مشکلات سازگاری:\n"
+                for conflict in compat_data['conflicting_mods']:
+                    report += f"  • {conflict['reason']}\n"
+                for missing in compat_data['missing_dependencies']:
+                    report += f"  • {missing['mod']} needs {missing['missing']}\n"
+            
+            hw_req = self.analyzer.calculate_hardware_requirements(self.player_var.get())
+            report += f"\n💻 سخت افزار پیشنهادی:\n"
+            report += f"  • حافظه: {hw_req['recommended_ram_gb']} GB\n"
+            report += f"  • CPU: {hw_req['cpu_recommendation']}\n"
+            report += f"  • فضای دیسک: {hw_req['disk_space_gb']} GB\n"
+            report += f"  • پهنای باند: {hw_req['network_mbps']} Mbps\n"
             
             self.report_text.delete(1.0, tk.END)
             self.report_text.insert(1.0, report)
@@ -839,12 +1069,15 @@ class ModAnalyzerGUI:
         
         if file_path:
             try:
+                compat_data = self.analyzer.check_compatibility()
                 data = {
                     'analysis_date': time.strftime('%Y-%m-%d %H:%M:%S'),
                     'directory_path': self.path_var.get(),
                     'total_mods': len(self.analyzer.mods),
-                    'compatibility_score': self.analyzer.check_compatibility().get('overall', 0) * 100,
-                    'hardware_requirements': self.analyzer.calculate_hardware_requirements(),
+                    'player_count': self.player_var.get(),
+                    'compatibility_score': compat_data.get('compatibility_score', 0),
+                    'compatibility_data': compat_data,
+                    'hardware_requirements': self.analyzer.calculate_hardware_requirements(self.player_var.get()),
                     'mods': [
                         {
                             'name': mod.name,
