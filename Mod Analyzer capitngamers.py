@@ -362,9 +362,9 @@ class ModAnalyzer:
                 
                 for mod in self.mods:
                     if include_version and mod.version != 'Unknown':
-                        f.write(f"{mod.mod_id}:{mod.version}\n")
+                        f.write(f'\t\t"{mod.mod_id}:{mod.version}",\n')
                     else:
-                        f.write(f"{mod.mod_id}\n")
+                        f.write(f'\t\t"{mod.mod_id}",\n')
                     
             return True
         except Exception as e:
@@ -1115,3 +1115,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"خطا در شروع برنامه: {e}")
         input("Press Enter to exit...")
+
